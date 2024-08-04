@@ -1,0 +1,113 @@
+import numpy as np
+from scipy.interpolate import CubicSpline
+from scipy.integrate import quad, dblquad
+from scipy.optimize import minimize
+import matplotlib.pyplot as plt
+
+# Generate synthetic data (replace with actual data if available)
+def true_model(t, x, a, b):
+    return np.exp(a * t) * np.cos(b * x)
+
+# Generate noisy observations
+np.random.seed(42) 
+a_true, b_true = 0.5, 2.0
+t = np.linspace(0, 10, 100)
+x = np.linspace(0, 10, 100)
+T, X = np.meshgrid(t, x)
+y_true = true_model(T, X, a_true, b_true)
+noise = np.random.normal(0, 0.5, y_true.shape)
+y_noisy = y_true + noise
+
+# Spline approximation (Choice 1: conventional collocation method)
+def spline_approximation(t, x, c, t_knots, x_knots):
+    cs_t = CubicSpline(t_knots, c.reshape(-1, len(x_knots)), axis=0)
+    cs_x = CubicSpline(x_knots, c.reshape(len(t_knots), -1), axis=1)
+    return cs_t(t).T * cs_x(x)
+
+# Define the PDE residual term
+def pde_residual(t, x, c, t_knots, x_knots, a, b):
+    cs_t = CubicSpline(t_knots, c.reshape(-1, len(x_knots)), axis=0)
+    cs_x = CubicSpline(x_knots, c.reshape(len(t_knots), -1), axis=1)
+    dcdt = cs_t(t, 1)
+    dcdx = cs_x(x, 1)
+    return dcdt - (a * dcdx + b)
+
+# Objective function to minimize
+def objective_function(params, t, x, y_noisy, t_knots, x_knots, lambda_reg):
+    a, b = params[:2]
+    c = params[2:]
+    
+    # Calculate spline approximation
+    y_estimated = spline_approximation(t, x, c, t_knots, x_knots)
+    
+    # Data fitting term
+    error = np.sum((y_noisy - y_estimated) ** 2) / y_noisy.size
+    
+    # PDE residual term
+    residual = lambda t, x: pde_residual(t, x, c, t_knots, x_knots, a, b) ** 2
+    ode_term, _ = dblquad(residual, t[0], t[-1], lambda x: x[0], lambda x: x[-1])
+    
+    return error + lambda_reg * ode_term
+
+# Gradient of the objective function
+def gradient(params, t, x, y_noisy, t_knots, x_knots, lambda_reg):
+    a, b = params[:2]
+    c = params[2:]
+    
+    cs_t = CubicSpline(t_knots, c.reshape(-1, len(x_knots)), axis=0)
+    cs_x = CubicSpline(x_knots, c.reshape(len(t_knots), -1), axis=1)
+    y_estimated = cs_t(t).T * cs_x(x)
+    
+    # Gradient with respect to a and b
+    grad_a = 2 * lambda_reg * np.sum((cs_t(t, 1) - (a * cs_x(x, 1) + b)) * (-cs_x(x, 1)))
+    grad_b = 2 * lambda_reg * np.sum((cs_t(t, 1) - (a * cs_x(x, 1) + b)) * (-1))
+    
+    # Gradient with respect to c
+    grad_c = np.zeros_like(c)
+    for i, t_knot in enumerate(t_knots):
+        for j, x_knot in enumerate(x_knots):
+            cs_t = CubicSpline(t_knots, c.reshape(-1, len(x_knots)), axis=0)
+            cs_x = CubicSpline(x_knots, c.reshape(len(t_knots), -1), axis=1)
+            grad_c[i * len(x_knots) + j] = 2 * np.sum((y_noisy - cs_t(t).T * cs_x(x)) * (-cs_t(t, i).T * cs_x(x, j))) / y_noisy.size
+            grad_c[i * len(x_knots) + j] += 2 * lambda_reg * dblquad(lambda t, x: (cs_t(t, 1) - (a * cs_x(x, 1) + b)) * cs_t(t, i).T * cs_x(x, j), t[0], t[-1], lambda x: x[0], lambda x: x[-1])[0]
+    
+    return np.concatenate([[grad_a], [grad_b], grad_c])
+
+# Initial guess for parameters
+t_knots = np.linspace(0, 10, 10)  # Number of knots can be adjusted
+x_knots = np.linspace(0, 10, 10)  # Number of knots can be adjusted
+initial_c = np.ones(len(t_knots) * len(x_knots))
+initial_guess = np.array([1.0, 1.0] + list(initial_c))
+
+# Regularization parameter
+lambda_reg = 0.1
+
+# Perform the optimization using BFGS algorithm
+result = minimize(objective_function, initial_guess, args=(t, x, y_noisy, t_knots, x_knots, lambda_reg),
+                  method='BFGS', jac=gradient)
+estimated_params = result.x
+
+# Extract the estimated parameters
+a_est, b_est = estimated_params[:2]
+c_est = estimated_params[2:]
+
+# Print the estimated parameters
+print("Estimated parameters:")
+print("a:", a_est)
+print("b:", b_est)
+
+# Plot the results
+y_estimated = spline_approximation(t, x, c_est, t_knots, x_knots)
+plt.figure(figsize=(10, 8))
+plt.subplot(2, 1, 1)
+plt.contourf(T, X, y_true, cmap='viridis')
+plt.colorbar()
+plt.title('True Data')
+
+plt.subplot(2, 1, 2)
+plt.contourf(T, X, y_estimated, cmap='viridis')
+plt.colorbar()
+plt.title('Estimated Model')
+
+plt.tight_layout()
+plt.show()
